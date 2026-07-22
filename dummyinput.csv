@@ -1,0 +1,10 @@
+# @title dummyinput.csv
+
+"""
+Num_Chrom, Num_Loci_1a, and GC_Con from the CSV and writes exactly
+Num_Loci_1a bases per chromosome, GC-weighted, straight to FASTA.
+"""
+
+Num_Chrom,1
+Num_Loci_1a,25000 
+GC_Con,0.6
