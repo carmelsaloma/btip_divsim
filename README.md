@@ -1,5 +1,5 @@
 # btip_divsim
-The scripts and code used for a diversity simulation project: "How low can we go?" Evaluating minimum sample size requirements for estimating nucleotide diversity via population genetic simulations.
+The scripts and code used for a project under the summer internship and training of the Philippine Genome Center Core Facilty of BIoinformatics: "How low can we go?" Evaluating minimum sample size requirements for estimating nucleotide diversity via population genetic simulations. 
 
 Co-interns: Carmel Saloma, Kyla Perocho, Marvin Bigay
 
