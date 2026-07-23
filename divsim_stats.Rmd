@@ -1,0 +1,647 @@
+---
+title: "stats"
+author: "Kyla Perocho"
+date: "2026-07-22"
+output: html_document
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r}
+# ============================================================================
+# CHROMOSOME ONE ONLY 
+#
+# FULL ANALYSIS: Nucleotide diversity (pi) as a function of sample size and
+# number of loci -- EDA, ANOVA, effects/interaction plots, diagnostics, RSM,
+# hypothesis testing, and optimal design point identification.
+#
+# Required packages:
+#   install.packages(c("rsm", "ggplot2"))
+# (car is NOT required -- Levene's test and Type II-style ANOVA equivalents
+# are done with base R below, in case 'car' fails to install due to missing
+# CMake for its nloptr/lme4 dependencies)
+#
+# Set seed and Directory
+# ============================================================================
+```
+
+## Directory
+
+```{r}
+getwd()
+setwd("C:/Users/Kyla Perocho/Downloads")
+```
+
+## Libraries
+
+```{r}
+library(rsm)
+library(ggplot2)   # for polished EDA plots
+library(knitr)
+library(scatterplot3d)
+library(dplyr)
+library(car)
+library(tseries)
+library(nortest)
+library(rstatix)
+```
+
+set.seed(42)
+
+# STEP 0: LOAD DATA
+
+```{r}
+# BASELINE
+
+baseline <- read.csv("pi values - true pi.csv") 
+true_pi <- baseline$pi_per_site[baseline$chromosome == "chr1"]
+
+# SAMPLE
+data <- read.csv("pi values - final_compiled_pi.csv")
+
+# PSEUDO  BASELINE
+# Filter for n_indiv == 100 & loci == 150/300, then compute the mean
+pseudo_true_pi <- data %>%
+  filter(n_indiv == 100, loci == 300) %>%
+  summarise(pseudo_true_pi = mean(avg_pi, na.rm = TRUE)) %>%
+  pull(pseudo_true_pi)
+```
+
+## STEP 1: EXPLORATORY DATA ANALYSIS (EDA)
+
+EDA: Data structure
+```{r}
+str(data) 
+```
+EDA: Replicates per design
+```{r}
+print(table(distinct$n_indiv, distinct$loci))
+```
+
+EDA: Summary statistics
+```{r}
+summary(data)
+```
+
+EDA: Mean/SD pi per design point
+
+```{r}
+eda_summary <- aggregate(avg_pi ~ n_indiv + loci, data = data,
+                         FUN = function(x) c(mean = mean(x), sd = sd(x), n = length(x)))
+kable(eda_summary)
+```
+
+EDA Plot 1: Faceted boxplot -- both factors shown together
+```{r}
+p1 <- ggplot(data, aes(x = n_indiv, y = avg_pi)) +
+  geom_violin(fill = "orange", alpha = 0.6) +
+  geom_hline(yintercept = true_pi, color = "red", linetype = "dashed") +
+  facet_wrap(~ loci, labeller = label_both, nrow=1) +
+  labs(title = "Pi distribution: sample size & loci count (faceted)",
+       x = "Sample size (n)", y = "Nucleotide diversity (pi)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+print(p1)
+```
+
+EDA Plot 2: 2D Scatterplot
+
+```{r}
+p2 <- scatterplot3d(data[c("n_indiv", "loci", "avg_pi")],
+                    main="3D Scatter Plot",
+                    xlab = "Indiv",
+                    ylab = "Loci",
+                    zlab = "Pi")
+```
+
+EDA Plot 3: Overall distribution (histogram/density) of pi estimates
+
+```{r}
+p3 <- ggplot(data, aes(x = n_indiv, y = avg_pi)) +
+  geom_point(fill = "orange", alpha = 0.6) +
+  geom_hline(yintercept = true_pi, color = "red", linetype = "dashed")
+  labs(title = "Pi distribution: sample size x loci count (faceted)",
+       x = "Sample size (n)", y = "Nucleotide diversity (pi)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+print(p3)
+
+
+p4 <- ggplot(data, aes(x = avg_pi)) +
+  geom_histogram(aes(y = after_stat(density)), bins = 40, fill = "gray70", color = "white") +
+  geom_density(color = "blue", linewidth = 1) +
+  geom_vline(xintercept = true_pi, color = "red", linetype = "dashed", linewidth = 1) +
+  labs(title = "Overall distribution of pi estimates (all design points combined)",
+       x = "Nucleotide diversity (pi)", y = "Density") +
+  theme_minimal()
+print(p4)
+```
+EDA INTERPRETATION:
+- Every single row for loci 150 through 300 is an exact duplicate down to the last decimal point across all n_indiv levels (1, 2, 3, 4, 5, 10, 20, 30, 50, 100). Which makes sense kasi each sample is 1 chromosome with 150 loci from 100 indiv, so greater than 150 loci values repeats.
+
+-  n=1 cannot measure within-sample pairwise diversity effectively, causing pi to drop near zero and affects the data by skewing it heavily to the left.
+
+- we have trimodal distribution, caused by n=1, then our "normal values of loci x indiv", then the duplicates from 150-300 loci.
+
+But let's say we proceeded with the analysis without cleaning the data, ie, removing n=1 and subsetting to 2-150 indiv only
+
+## STEP 2: TWO-ANOVA AND DIAGNOSTIC PLOTS
+Ho: (main effect n_samples): mean pi is the same across all sample sizes
+Ho: (main effect n_loci): mean pi is the same across all loci counts
+Ho :(interaction): the effect of sample size on pi does not
+
+```{r}
+# Model
+model_anova <- aov(avg_pi ~ n_indiv * loci, data = data)
+print(summary(model_anova))
+```
+
+
+```{r}
+# Main Effects
+main_eff_samples <- aggregate(avg_pi ~ n_indiv, data = data, FUN = mean)
+main_eff_loci    <- aggregate(avg_pi ~ loci, data = data, FUN = mean)
+
+par(mfrow = c(1, 2))
+plot(main_eff_samples$n_indiv, main_eff_samples$avg_pi, type = "b", pch = 19,
+     xlab = "Sample size", ylab = "Mean pi", main = "Main effect: sample size")
+abline(h = true_pi, col = "red", lty = 2)
+
+plot(main_eff_loci$loci, main_eff_loci$avg_pi, type = "b", pch = 19, col = "darkgreen",
+     xlab = "Number of loci", ylab = "Mean pi", main = "Main effect: loci")
+abline(h = true_pi, col = "red", lty = 2)
+par(mfrow = c(1, 1))
+```
+
+
+```{r}
+# Interaction Effect
+interaction.plot(
+  x.factor = data$n_indiv, trace.factor = data$loci,
+  response = data$avg_pi, fun = mean,
+  type = "b", pch = 19, col = rainbow(length(unique(data$loci))),
+  xlab = "Sample size", ylab = "Mean pi", trace.label = "loci",
+  main = "Interaction Plot: sample size x loci"
+)
+abline(h = true_pi, col = "red", lty = 2)
+```
+
+
+```{r}
+# Diagnostic Plots
+par(mfrow = c(2, 2))
+plot(model_anova)
+par(mfrow = c(1, 1))
+```
+
+
+```{r}
+# Normality Test
+shapiro_result <- shapiro.test(residuals(model_anova))
+print(shapiro_result)
+```
+
+
+```{r}
+# Heteroscedasticity Test (Levene's Test)
+manual_levene_test <- function(y, group) {
+  group <- factor(group)
+  medians <- tapply(y, group, median)
+  abs_dev <- abs(y - medians[group])
+  fit <- aov(abs_dev ~ group)
+  summary(fit)
+}
+
+group_combo <- interaction(data$n_indiv, data$loci)
+levene_result <- manual_levene_test(data$avg_pi, group_combo)
+cat("\nLevene's test for homogeneity of variance (manual base-R version):\n")
+print(levene_result)
+levene_p <- levene_result[[1]]$"Pr(>F)"[1]
+
+# using car package
+# leveneTest(avg_pi ~ factor(n_indiv) * factor(loci), data = data)
+```
+
+# GET DISTINCT COMBINATION VALUES
+```{r}
+distinct <- data %>%
+  filter(loci %in% c(30, 60, 90, 120, 150),
+         n_indiv > 1)
+```
+## STEP 1: EXPLORATORY DATA ANALYSIS (EDA)
+
+EDA: Mean/SD pi per design point
+```{r}
+eda_summary <- aggregate(avg_pi ~ n_indiv + loci, data = distinct,
+                         FUN = function(x) c(mean = mean(x), sd = sd(x), n = length(x)))
+kable(eda_summary)
+```
+
+EDA Plot 1: Faceted boxplot -- both factors shown together
+```{r}
+p1 <- ggplot(distinct, aes(x = n_indiv, y = avg_pi)) +
+  geom_violin(fill = "orange", alpha = 0.6) +
+  geom_hline(yintercept = true_pi, color = "red", linetype = "dashed") +
+  facet_wrap(~ loci, labeller = label_both, nrow=1) +
+  labs(title = "Pi distribution: sample size & loci count (faceted)",
+       x = "Sample size (n)", y = "Nucleotide diversity (pi)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+print(p1)
+```
+
+EDA Plot 2: 2D Scatterplot
+
+```{r}
+p2 <- scatterplot3d(distinct[c("n_indiv", "loci", "avg_pi")],
+                    main="3D Scatter Plot",
+                    xlab = "Indiv",
+                    ylab = "Loci",
+                    zlab = "Pi")
+```
+
+EDA Plot 3: Overall distribution (histogram/density) of pi estimates
+
+```{r}
+p3 <- ggplot(distinct, aes(x = n_indiv, y = avg_pi)) +
+  geom_point(fill = "orange", alpha = 0.6) +
+  geom_hline(yintercept = true_pi, color = "red", linetype = "dashed")
+  labs(title = "Pi distribution: sample size x loci count (faceted)",
+       x = "Sample size (n)", y = "Nucleotide diversity (pi)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+print(p3)
+
+
+p4 <- ggplot(distinct, aes(x = avg_pi)) +
+  geom_histogram(aes(y = after_stat(density)), bins = 40, fill = "gray70", color = "white") +
+  geom_density(color = "blue", linewidth = 1) +
+  geom_vline(xintercept = true_pi, color = "red", linetype = "dashed", linewidth = 1) +
+  labs(title = "Overall distribution of pi estimates (all design points combined)",
+       x = "Nucleotide diversity (pi)", y = "Density") +
+  theme_minimal()
+print(p4)
+```
+## STEP 2: TWO-WAY ANOVA (factorial, treating n_indiv & loci as categorical)
+Ho: (main effect n_samples): mean pi is the same across all sample sizes
+Ho: (main effect n_loci): mean pi is the same across all loci counts
+Ho :(interaction): the effect of sample size on pi does not
+```{r}
+distinct_anova <- aov(avg_pi ~ n_indiv * loci, data = distinct) # Type I
+summary(distinct_anova)
+```
+## STEP 3: EFFECTS PLOTS & INTERACTION PLOT
+```{r}
+# Main effects plots (marginal means for each factor individually)
+main_eff_samples <- aggregate(avg_pi ~ n_indiv, data = distinct, FUN = mean)
+main_eff_loci    <- aggregate(avg_pi ~ loci, data = distinct, FUN = mean)
+
+par(mfrow = c(1, 2))
+plot(main_eff_samples$n_indiv, main_eff_samples$avg_pi, type = "b", pch = 19,
+     xlab = "Sample size", ylab = "Mean pi", main = "Main effect: sample size")
+abline(h = true_pi, col = "red", lty = 2)
+
+plot(main_eff_loci$loci, main_eff_loci$avg_pi, type = "b", pch = 19, col = "darkgreen",
+     xlab = "Number of loci", ylab = "Mean pi", main = "Main effect: loci")
+abline(h = true_pi, col = "red", lty = 2)
+par(mfrow = c(1, 1))
+```
+
+
+```{r}
+# Interaction Effect
+interaction.plot(
+  x.factor = distinct$n_indiv, trace.factor = distinct$loci,
+  response = distinct$avg_pi, fun = mean,
+  type = "b", pch = 19, col = rainbow(length(unique(distinct$loci))),
+  xlab = "Sample size", ylab = "Mean pi", trace.label = "loci",
+  main = "Interaction Plot: sample size x loci"
+)
+abline(h = true_pi, col = "red", lty = 2)
+```
+
+## STEP 4: DIAGNOSTIC TESTS (residual diagnostics for the ANOVA model)
+```{r}
+# Diagnostic Plots
+par(mfrow = c(2, 2))
+plot(distinct_anova)
+par(mfrow = c(1, 1))
+```
+
+
+```{r}
+# Normality Test (Shapiko-Wilk)
+shapiro_result <- shapiro.test(residuals(distinct_anova))
+print(shapiro_result)
+
+# Other Tests (Jacque-Bera, Anderson-Darling)
+jarque.bera.test(residuals(distinct_anova))
+ad.test(residuals(distinct_anova))
+```
+
+```{r}
+# Heteroscedasticity Test (Levene's Test)
+manual_levene_test <- function(y, group) {
+  group <- factor(group)
+  medians <- tapply(y, group, median)
+  abs_dev <- abs(y - medians[group])
+  fit <- aov(abs_dev ~ group)
+  summary(fit)
+}
+
+group_combo <- interaction(distinct$n_indiv, distinct$loci)
+levene_result <- manual_levene_test(distinct$avg_pi, group_combo)
+cat("\nLevene's test for homogeneity of variance (manual base-R version):\n")
+print(levene_result)
+levene_p <- levene_result[[1]]$"Pr(>F)"[1]
+
+# using car package
+# leveneTest(log(avg_pi) ~ factor(n_indiv) * factor(loci), data = distinct)
+```
+
+Since we have heteroscedastic model, we do correction for the model we will use in hypothesis testing
+```{r}
+distinct_anova2 <- Anova(distinct_anova, type = "II", white.adjust = "hc3")
+distinct_anova2
+```
+
+```{r}
+# Post Hoc
+
+## Main effects (indiv)
+gh_n_indiv <- distinct %>%
+  games_howell_test(avg_pi ~ n_indiv)
+
+print(gh_n_indiv)
+
+## Main effects (loci)
+gh_loci <- distinct %>%
+  games_howell_test(avg_pi ~ loci)
+
+print(gh_loci)
+
+## Interaction
+interaction <- distinct %>%
+  mutate(group = interaction(n_indiv, loci, sep = "_"))
+
+gh_interaction <- interaction %>%
+  games_howell_test(avg_pi ~ group)
+
+print(gh_interaction)
+
+# summary
+lowest_n_indiv <- gh_n_indiv %>%
+  filter(p.adj == min(p.adj))
+
+lowest_loci <- gh_loci %>%
+  filter(p.adj == min(p.adj))
+
+lowest_int <- gh_interaction %>%
+  filter(p.adj == min(p.adj))
+
+rbind(lowest_n_indiv,  lowest_loci, lowest_int)
+
+```
+
+## STEP 5: RSM ANALYSIS (response surface regression, continuous factors)
+```{r}
+data_coded <- coded.data(
+  distinct,
+  x1 ~ (n_indiv - mean(range(distinct$n_indiv))) / (diff(range(distinct$n_indiv)) / 2),
+  x2 ~ (loci    - mean(range(distinct$loci)))    / (diff(range(distinct$loci)) / 2)
+)
+
+model_FO <- rsm(avg_pi ~ FO(x1, x2), data = data_coded)
+model_SO <- rsm(avg_pi ~ SO(x1, x2), data = data_coded)
+
+# RSM: FIRST-ORDER MODEL
+summary(model_FO)
+
+# RSM: SECOND-ORDER MODEL
+summary(model_SO)
+```
+INTERPRETATION:
+kahit na may lack of fit siya, SO can already present the 77% of the total variation
+optimal: ~65, ~76
+
+from then on, increasing can actually diminish the power of estimating the true pi
+
+```{r}
+# response surface visualizations
+persp(model_SO, x1 ~ x2, col = "lightblue", contours = "colors",
+      xlabs = c("Sample size (coded)", "Number of loci (coded)"),
+      zlab = "Estimated pi", main = "Response Surface: pi vs sample size x loci")
+
+contour(model_SO, x1 ~ x2,
+        xlabs = c("Sample size (coded)", "Number of loci (coded)"),
+        main = "Contour Plot: pi response surface")
+
+image(model_SO, x1 ~ x2,
+      xlabs = c("Sample size (coded)", "Number of loci (coded)"),
+      main = "Heatmap: pi response surface")
+```
+# STEP 6: n=2 ADEQUACY HYPOTHESIS TEST (bootstrap RMSE)
+Ho: RMSE(n=2) >= $\delta$ * true_pi  (n=2 is NOT adequate)
+Ha: RMSE(n=2) < $\delta$ true_pi  (n=2 IS adequate)
+
+```{r}
+# Define your acceptable error threshold (e.g., 10% of true_pi) delta
+delta <- 35  # Change to 5, 10, or 15 based on study strictness
+
+bootstrap_rmse_test <- function(estimates, true_value, threshold_pct = 10, n_boot = 10000) {
+  n <- length(estimates)
+  
+  # Absolute threshold value (e.g., 10% of true_pi)
+  threshold_val <- true_value * (threshold_pct / 100)
+  
+  boot_rmse <- numeric(n_boot)
+  for (i in 1:n_boot) {
+    resampled <- sample(estimates, size = n, replace = TRUE)
+    boot_rmse[i] <- sqrt(mean((resampled - true_value)^2))
+  }
+  
+  observed_rmse <- sqrt(mean((estimates - true_value)^2))
+  
+  # One-tailed test: Probability that true RMSE is GREATER THAN OR EQUAL TO threshold
+  p_value <- mean(boot_rmse >= threshold_val)
+  ci <- quantile(boot_rmse, c(0.025, 0.975))
+  
+  list(
+    observed_rmse = observed_rmse, 
+    observed_rmse_pct = 100 * (observed_rmse / true_value),
+    threshold_val = threshold_val,
+    threshold_pct = threshold_pct,
+    ci_lower = ci[1], 
+    ci_upper = ci[2], 
+    p_value = p_value, 
+    reject_h0 = p_value < 0.05
+  )
+}
+
+# Run the test against Chromosome 1 true_pi
+n2_estimates <- distinct$avg_pi[distinct$n_indiv == 2]
+n2_test <- bootstrap_rmse_test(n2_estimates, true_pi, threshold_pct = delta)
+
+cat("\n=== n=2 ADEQUACY HYPOTHESIS TEST ===\n")
+cat("Chromosome 1 True Pi:", true_pi, "\n")
+cat("Observed RMSE:", n2_test$observed_rmse, "(", round(n2_test$observed_rmse_pct, 2), "% of true pi)\n")
+cat("Target Threshold:", n2_test$threshold_val, "(", n2_test$threshold_pct, "% of true pi)\n")
+cat("Bootstrap p-value:", n2_test$p_value, "\n")
+cat("Decision:", ifelse(n2_test$reject_h0,
+                        "REJECT H0 -> n=2 IS adequate (RMSE is significantly < threshold)",
+                        "FAIL TO REJECT H0 -> n=2 is NOT adequate (RMSE >= threshold)"), "\n")
+```
+
+# STEP 7: OPTIMAL DESIGN POINT (cost-aware, within adequacy tolerance)
+```{r}
+# 1. Define target RMSE threshold based on your acceptable error percentage
+target_rmse_threshold <- true_pi * (delta / 100)
+
+# -----------------------------------------------------------------------------
+# A. EMPIRICAL BEST (from actual tested design combinations)
+# -----------------------------------------------------------------------------
+# Calculate observed RMSE for each empirical combination of n_indiv and loci
+agg_emp <- aggregate(avg_pi ~ n_indiv + loci, data = distinct, FUN = function(x) {
+  sqrt(mean((x - true_pi)^2)) # Empirical RMSE
+})
+colnames(agg_emp)[3] <- "observed_rmse"
+
+# Filter for adequate empirical combinations (RMSE <= target_rmse_threshold)
+adequate_empirical <- agg_emp[agg_emp$observed_rmse <= target_rmse_threshold, ]
+
+if (nrow(adequate_empirical) > 0) {
+  adequate_empirical$cost <- adequate_empirical$n_indiv + adequate_empirical$loci
+  best_empirical <- adequate_empirical[which.min(adequate_empirical$cost), ]
+} else {
+  # If no point meets strict adequacy, pick the one with lowest overall RMSE
+  best_empirical <- agg_emp[which.min(agg_emp$observed_rmse), ]
+  warning("No empirical design point met the strict RMSE threshold. Returning lowest RMSE point.")
+}
+
+# -----------------------------------------------------------------------------
+# B. MODEL-BASED OPTIMAL POINT (searches the fitted RSM surface)
+# -----------------------------------------------------------------------------
+# Create fine grid across coded space (-1 to +1)
+grid <- expand.grid(
+  x1 = seq(-1, 1, length.out = 200),
+  x2 = seq(-1, 1, length.out = 200)
+)
+
+# Predict pi from Second-Order RSM model
+grid$predicted_pi <- predict(model_SO, newdata = grid)
+
+# Convert predicted bias into estimated prediction error (RMSE proxy)
+grid$predicted_rmse <- abs(grid$predicted_pi - true_pi)
+
+# Uncode x1 and x2 back to original scale (n_indiv and loci)
+grid$n_indiv <- grid$x1 * (diff(range(distinct$n_indiv)) / 2) + mean(range(distinct$n_indiv))
+grid$loci    <- grid$x2 * (diff(range(distinct$loci))    / 2) + mean(range(distinct$loci))
+
+# Filter grid for points that satisfy ADEQUACY (Predicted RMSE <= Target Threshold)
+adequate_grid <- grid[grid$predicted_rmse <= target_rmse_threshold, ]
+
+if (nrow(adequate_grid) > 0) {
+  # Calculate cost (Adjust weights here if sequencing individuals costs more than loci)
+  adequate_grid$cost <- adequate_grid$n_indiv + adequate_grid$loci
+  
+  # Pick the point with the lowest cost among all adequate points
+  best_model_based <- adequate_grid[which.min(adequate_grid$cost), ]
+} else {
+  # If no point on the surface meets adequacy, pick the minimum error point on the surface
+  best_model_based <- grid[which.min(grid$predicted_rmse), ]
+  warning("No RSM surface point met the strict RMSE threshold. Returning minimum error point.")
+}
+
+# -----------------------------------------------------------------------------
+# PRINT RESULTS
+# -----------------------------------------------------------------------------
+cat("\n=== OPTIMAL DESIGN POINT SELECTION ===\n")
+cat("Target RMSE Threshold (", delta, "% of true pi):", round(target_rmse_threshold, 6), "\n\n")
+
+cat("--> Empirical Cheapest-Adequate Point:\n")
+cat("    n_indiv:", round(best_empirical$n_indiv, 1), 
+    "| loci:", round(best_empirical$loci, 1), 
+    "| RMSE:", round(best_empirical$observed_rmse, 6), "\n\n")
+
+cat("--> RSM Model-Based Cheapest-Adequate Point:\n")
+cat("    n_indiv:", round(best_model_based$n_indiv, 1), 
+    "| loci:", round(best_model_based$loci, 1), 
+    "| Predicted RMSE:", round(best_model_based$predicted_rmse, 6), "\n")
+```
+
+
+```{r}
+# =============================================================================
+# STEP 8: CONSOLIDATED SUMMARY TABLE (Safe Type II ANOVA Extraction)
+# =============================================================================
+
+# Convert Type II ANOVA object to a standard data frame to extract p-values safely
+anova_df <- as.data.frame(distinct_anova2)
+
+# Helper function to extract p-value for a given term without crashing
+get_p_val <- function(df, row_pattern) {
+  row_idx <- grep(row_pattern, rownames(df), ignore.case = TRUE)[1]
+  if (is.na(row_idx)) return(NA)
+  p_col <- grep("Pr|p", colnames(df), ignore.case = TRUE)[1]
+  return(as.numeric(df[row_idx, p_col]))
+}
+
+# Extract p-values for main effects and interaction
+p_n_indiv <- get_p_val(anova_df, "^n_indiv$")
+p_loci    <- get_p_val(anova_df, "^loci$")
+p_int     <- get_p_val(anova_df, "n_indiv:loci|n_indiv\\*loci")
+
+# Safe helper for p-value formatting
+fmt_p <- function(val) {
+  if (is.null(val) || is.na(val)) return("-")
+  return(signif(val, 4))
+}
+
+summary_table <- data.frame(
+  Item = c(
+    "ANOVA: main effect of n_indiv (p-value)",
+    "ANOVA: main effect of loci (p-value)",
+    "ANOVA: interaction n_indiv x loci (p-value)",
+    "Shapiro-Wilk normality test (p-value)",
+    "Levene's test for equal variance (p-value)",
+    "RSM model adequacy test (FO vs SO, p-value)",
+    "  -> Decision",
+    "n=2 adequacy test (bootstrap RMSE, p-value)",
+    "  -> Decision",
+    "Best EMPIRICAL design point: n_indiv",
+    "Best EMPIRICAL design point: loci",
+    "Best EMPIRICAL design point: abs. diff from true pi",
+    "Best COST-AWARE design point: n_indiv",
+    "Best COST-AWARE design point: loci",
+    "Best COST-AWARE design point: abs. diff from true pi"
+  ),
+  Value = c(
+    fmt_p(p_n_indiv),
+    fmt_p(p_loci),
+    fmt_p(p_int),
+    fmt_p(shapiro_result$p.value),
+    fmt_p(levene_p),
+    fmt_p(p_val),
+    ifelse(!is.na(p_val) && p_val < 0.05, "Second-order model needed", "First-order model adequate"),
+    fmt_p(n2_test$p_value),
+    ifelse(n2_test$reject_h0, "n=2 IS adequate", "n=2 is NOT adequate"),
+    best_empirical$n_indiv,
+    best_empirical$loci,
+    signif(ifelse(!is.null(best_empirical$abs_diff), best_empirical$abs_diff, best_empirical$observed_rmse), 6),
+    if (!is.null(best_model_based)) round(best_model_based$n_indiv) else "none found",
+    if (!is.null(best_model_based)) round(best_model_based$loci) else "-",
+    if (!is.null(best_model_based)) signif(ifelse(!is.null(best_model_based$abs_diff), best_model_based$abs_diff, best_model_based$predicted_rmse), 6) else "-"
+  )
+)
+
+cat("\n\n=====================================================\n")
+cat("           FULL ANALYSIS SUMMARY TABLE\n")
+cat("=====================================================\n")
+print(summary_table, row.names = FALSE)
+
+write.csv(summary_table, "full_analysis_summary_table.csv", row.names = FALSE)
+cat("\nSaved: full_analysis_summary_table.csv\n")
+
+```
+
